@@ -23,14 +23,13 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           import hashlib
-          import re
           import xml.etree.ElementTree as ET
 
           root = Path(".").resolve()
           report = [
               "# Static repository review",
               "",
-              "> This report is produced by a static inspection only. The application, project build, and repository DLL files are not executed.",
+              "> Static inspection only: the application, project build, and repository DLL files are not executed.",
               "",
           ]
 
@@ -52,11 +51,14 @@ jobs:
           if not sln_files:
               report.append("- WARNING: no .sln file found.")
           for sln in sln_files:
-              text = sln.read_text(encoding="utf-8-sig", errors="replace")
-              project_refs = re.findall(r'^Project\\([^\\n]+?= [^,]+, "([^"]+\\.csproj)"', text, re.I | re.M)
+              content = sln.read_text(encoding="utf-8-sig", errors="replace")
+              project_refs = []
+              for line in content.splitlines():
+                  if line.startswith("Project(") and ".csproj" in line.lower():
+                      project_refs += [part for part in line.split('"') if part.lower().endswith(".csproj")]
               report.append(f"- Solution: `{sln.relative_to(root).as_posix()}`")
               for ref in project_refs:
-                  target = (sln.parent / Path(ref.replace("\\\\", "/"))).resolve()
+                  target = (sln.parent / Path(ref.replace(chr(92), "/"))).resolve()
                   exists = target.is_file()
                   status = "OK" if exists else "MISSING"
                   report.append(f"  - [{status}] project reference `{ref}`")
@@ -68,9 +70,8 @@ jobs:
                   for node in tree.iter():
                       if node.tag.split("}")[-1] == "HintPath" and node.text:
                           hint = node.text.strip()
-                          target = (csproj.parent / Path(hint.replace("\\\\", "/"))).resolve()
-                          exists = target.is_file()
-                          if not exists:
+                          target = (csproj.parent / Path(hint.replace(chr(92), "/"))).resolve()
+                          if not target.is_file():
                               report.append(f"  - [MISSING IN CHECKOUT] HintPath `{hint}`")
               except ET.ParseError as exc:
                   report.append(f"  - [ERROR] Could not parse project XML: {exc}")
@@ -78,14 +79,18 @@ jobs:
               report.append("- WARNING: no Visual Studio solution or project file found.")
           report.append("")
 
-          report += ["## Heuristic source indicators", "",
-                     "Matches below are review leads, not proof of malicious behavior. DLL internals are not decompiled or executed.", ""]
+          report += [
+              "## Heuristic source indicators",
+              "",
+              "Matches below are review leads, not proof of malicious behavior. DLL internals are not decompiled or executed.",
+              "",
+          ]
           indicators = {
-              "process execution": re.compile(r"Process\\s*\\.\\s*Start|ProcessStartInfo|CreateProcess|cmd\\.exe|powershell", re.I),
-              "network APIs or sockets": re.compile(r"HttpClient|WebClient|TcpClient|Socket|WebRequest|fetch\\s*\\(|XMLHttpRequest|https?://", re.I),
-              "browser storage/cookies": re.compile(r"GetAllCookie|GetCookie|SetCookie|LocalStorage|UserDataDir|cookie", re.I),
-              "credentials or phone-verification fields": re.compile(r"Password|PhoneKey|RecoveryEmail|Authorization|ApiKey|token", re.I),
-              "native interop": re.compile(r"DllImport|LibraryImport|Marshal\\.", re.I),
+              "process execution": ["process.start", "processstartinfo", "createprocess", "cmd.exe", "powershell"],
+              "network APIs or sockets": ["httpclient", "webclient", "tcpclient", "socket", "webrequest", "fetch(", "xmlhttprequest", "https://", "http://"],
+              "browser storage/cookies": ["getallcookie", "getcookie", "setcookie", "localstorage", "userdatadir", "cookie"],
+              "credentials or phone-verification fields": ["password", "phonekey", "recoveryemail", "authorization", "apikey", "token"],
+              "native interop": ["dllimport", "libraryimport", "marshal."],
           }
           scanned_exts = {".cs", ".xml", ".config", ".csproj", ".md", ".json", ".yml", ".yaml", ".ps1", ".bat", ".cmd"}
           matches = 0
@@ -94,21 +99,29 @@ jobs:
                   continue
               data = path.read_text(encoding="utf-8-sig", errors="replace")
               for line_no, line in enumerate(data.splitlines(), 1):
-                  for label, pattern in indicators.items():
-                      if pattern.search(line):
+                  lowered = line.lower()
+                  for label, tokens in indicators.items():
+                      if any(token in lowered for token in tokens):
                           report.append(f"- `{path.relative_to(root).as_posix()}:{line_no}` — {label}")
                           matches += 1
                           break
           if matches == 0:
               report.append("- No matches for the listed heuristic indicators.")
-          report += ["", f"Total source-line matches: {matches}", "",
-                     "## Important limitations", "",
-                     "- This is not a malware verdict and does not prove that the application is safe.",
-                     "- Static text scans cannot determine the complete behavior of precompiled DLLs.",
-                     "- No EXE, installer, release, or executable build artifact is created by this workflow.",
-                     "- Inspect the report and source manually before running any downloaded program.", ""]
-          Path("static-review.md").write_text("\\n".join(report), encoding="utf-8")
-          print("\\n".join(report))
+          report += [
+              "",
+              f"Total source-line matches: {matches}",
+              "",
+              "## Important limitations",
+              "",
+              "- This is not a malware verdict and does not prove that the application is safe.",
+              "- Static text scans cannot determine the complete behavior of precompiled DLLs.",
+              "- No EXE, installer, release, or executable build artifact is created by this workflow.",
+              "- Inspect the report and source manually before running any downloaded program.",
+              "",
+          ]
+          report_text = chr(10).join(report)
+          Path("static-review.md").write_text(report_text, encoding="utf-8")
+          print(report_text)
           PY
 
       - name: Upload the text report
